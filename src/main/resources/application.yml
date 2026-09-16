@@ -24,6 +24,19 @@ spring:
         pool:
           max-active: 64
           max-idle: 16
+  rabbitmq:
+    host: localhost
+    port: 5672
+    username: seckill
+    password: seckill123
+    publisher-confirm-type: correlated
+    publisher-returns: true
+    listener:
+      simple:
+        acknowledge-mode: manual
+        prefetch: 50
+        concurrency: 5
+        max-concurrency: 10
 
 mybatis-plus:
   configuration:

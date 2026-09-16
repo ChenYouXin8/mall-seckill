@@ -1,5 +1,7 @@
 package com.example.seckill.redis;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -7,6 +9,7 @@ import org.springframework.data.redis.core.script.DefaultRedisScript;
 import org.springframework.stereotype.Service;
 
 import java.util.Collections;
+import java.util.Map;
 import java.util.concurrent.TimeUnit;
 
 /**
@@ -20,9 +23,12 @@ public class RedisStockService {
 
     public static final String STOCK_KEY_PREFIX = "seckill:stock:";
     public static final String BOUGHT_KEY_PREFIX = "seckill:bought:";
+    public static final String RESULT_KEY_PREFIX = "seckill:result:";
+    public static final String COMPENSATE_KEY_PREFIX = "seckill:compensate:";
 
     private final StringRedisTemplate redisTemplate;
     private final LuaScripts luaScripts;
+    private final ObjectMapper objectMapper = new ObjectMapper();
 
     /**
      * 预热库存（F2）：SET NX 幂等——仅当 key 不存在时写入 totalStock，重复预热不翻倍、不覆盖进行中的扣减。
@@ -88,5 +94,55 @@ public class RedisStockService {
      */
     public void expireBought(Long activityId, Long userId, long ttlSeconds) {
         redisTemplate.expire(boughtKey(activityId, userId), ttlSeconds, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 写下单结果缓存（文档 3.3：seckill:result:{orderNo}，TTL 10min）。
+     */
+    public void writeResult(String orderNo, Object data) {
+        try {
+            redisTemplate.opsForValue().set(RESULT_KEY_PREFIX + orderNo,
+                    objectMapper.writeValueAsString(data), 10, TimeUnit.MINUTES);
+        } catch (JsonProcessingException e) {
+            log.error("结果缓存序列化失败: orderNo={}", orderNo, e);
+        }
+    }
+
+    /**
+     * 读下单结果缓存（轮询查询用，文档 7.6：查询量小，缓存穿透回 DB 可接受）。
+     */
+    public String readResult(String orderNo) {
+        return redisTemplate.opsForValue().get(RESULT_KEY_PREFIX + orderNo);
+    }
+
+    /**
+     * 删除结果缓存（缓存一致性：先更新 DB 再删缓存，文档 7.6）。
+     */
+    public void deleteResult(String orderNo) {
+        redisTemplate.delete(RESULT_KEY_PREFIX + orderNo);
+    }
+
+    /**
+     * 补偿计数 +1（超时回补时 Redis 失败，记录待补偿数量，文档 7.8）。
+     */
+    public void incrCompensate(Long activityId, Long productId) {
+        redisTemplate.opsForValue().increment(COMPENSATE_KEY_PREFIX + activityId + ":" + productId);
+    }
+
+    /**
+     * 取走并清空补偿计数（返回待回补数量）。
+     */
+    public long drainCompensate(Long activityId, Long productId) {
+        String key = COMPENSATE_KEY_PREFIX + activityId + ":" + productId;
+        String val = redisTemplate.opsForValue().get(key);
+        if (val == null) {
+            return 0;
+        }
+        redisTemplate.delete(key);
+        try {
+            return Long.parseLong(val);
+        } catch (NumberFormatException e) {
+            return 0;
+        }
     }
 }

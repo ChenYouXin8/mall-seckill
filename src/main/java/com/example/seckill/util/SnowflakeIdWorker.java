@@ -1,5 +1,7 @@
 package com.example.seckill.util;
 
+import org.springframework.stereotype.Component;
+
 import java.net.NetworkInterface;
 import java.security.SecureRandom;
 import java.time.Instant;
@@ -8,7 +10,10 @@ import java.util.Enumeration;
 /**
  * 雪花算法 ID 生成器（文档 9.1 目录中 util/SnowflakeIdWorker）。
  * 64 位：1bit 符号位 + 41bit 毫秒时间戳 + 10bit 机器位 + 12bit 序列号。
+ * <p>以 Spring 单例 Bean 提供，全应用共享同一实例，避免多实例同毫秒同序列生成重复 ID
+ * （M3 曾因此导致订单主键冲突、消息落库失败）。</p>
  */
+@Component
 public class SnowflakeIdWorker {
 
     /** 起始时间戳：2024-01-01 00:00:00 UTC */

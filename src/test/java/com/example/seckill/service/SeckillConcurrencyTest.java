@@ -1,6 +1,7 @@
 package com.example.seckill.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.seckill.config.RabbitConfig;
 import com.example.seckill.entity.Activity;
 import com.example.seckill.entity.Order;
 import com.example.seckill.entity.Stock;
@@ -11,6 +12,8 @@ import com.example.seckill.redis.RedisStockService;
 import com.example.seckill.util.SnowflakeIdWorker;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.amqp.rabbit.core.RabbitAdmin;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -29,8 +32,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
- * M2 验收测试（文档 7.2/10.1）：
- * 并发 5000 线程抢 10 件库存 → Lua 扣减成功恰 10 次、Redis 余量 0、DB 订单恰 10 条、无超卖无重复。
+ * M2/M3 验收测试（文档 7.2/10.1）：
+ * 并发 5000 线程抢 10 件库存 → Lua 扣减成功恰 10 次、Redis 余量 0、MQ 消费后 DB 订单恰 10 条。
  */
 @SpringBootTest
 class SeckillConcurrencyTest {
@@ -47,6 +50,8 @@ class SeckillConcurrencyTest {
     private RedisStockService redisStockService;
     @Autowired
     private StringRedisTemplate redisTemplate;
+    @Autowired
+    private RabbitTemplate rabbitTemplate;
 
     private final SnowflakeIdWorker snowflake = new SnowflakeIdWorker();
     private final List<Long> createdActivities = new ArrayList<>();
@@ -76,6 +81,11 @@ class SeckillConcurrencyTest {
 
     @AfterEach
     void cleanup() {
+        // 先等待消费者消费完剩余消息，再清理，避免消息积压重新落库
+        try {
+            TimeUnit.SECONDS.sleep(5);
+        } catch (InterruptedException ignored) {
+        }
         for (Long activityId : createdActivities) {
             orderMapper.delete(new LambdaQueryWrapper<Order>().eq(Order::getActivityId, activityId));
             stockMapper.delete(new LambdaQueryWrapper<Stock>().eq(Stock::getActivityId, activityId));
@@ -85,12 +95,16 @@ class SeckillConcurrencyTest {
                 redisTemplate.delete(redisStockService.boughtKey(activityId, 1000000L + i));
             }
         }
+        // 清空队列，防止残留消息影响其他测试
+        RabbitAdmin admin = new RabbitAdmin(rabbitTemplate);
+        admin.purgeQueue(RabbitConfig.ORDER_QUEUE, false);
+        admin.purgeQueue(RabbitConfig.ORDER_DLQ, false);
         createdActivities.clear();
     }
 
     /**
      * 文档 7.2 验收：并发 5000 线程抢 10 件库存。
-     * 期望：成功恰 10（Lua 返回 1 恰 10 次）、库存不足 4990、Redis 余量 0、DB 订单恰 10。
+     * 期望：成功恰 10（Lua 返回 1 恰 10 次）、库存不足 4990、Redis 余量 0、MQ 消费后 DB 订单恰 10。
      */
     @Test
     void concurrent5000Seckill10Stock() throws InterruptedException {
@@ -131,12 +145,23 @@ class SeckillConcurrencyTest {
         assertTrue(done.await(180, TimeUnit.SECONDS), "并发抢购超时");
         pool.shutdown();
 
-        assertEquals("0", redisStockService.remaining(activityId, 1001L), "Redis 余量必须为 0");
+        // 入口层断言
         assertEquals(10, success.get(), "Lua 扣减成功次数必须恰为 10（不得超卖）");
         assertEquals(4990, stockNotEnough.get(), "其余必须全部为库存不足");
         assertEquals(0, other.get(), "不应有其他错误码");
-        Long orderCount = orderMapper.selectCount(new LambdaQueryWrapper<Order>()
-                .eq(Order::getActivityId, activityId));
-        assertEquals(10L, orderCount, "DB 订单数必须恰为 10");
+        assertEquals("0", redisStockService.remaining(activityId, 1001L), "Redis 余量必须为 0");
+
+        // 等待 MQ 消费者落库完成（最长 60s）
+        long deadline = System.currentTimeMillis() + 60_000;
+        Long orderCount = 0L;
+        while (System.currentTimeMillis() < deadline) {
+            orderCount = orderMapper.selectCount(new LambdaQueryWrapper<Order>()
+                    .eq(Order::getActivityId, activityId));
+            if (orderCount != null && orderCount == 10) {
+                break;
+            }
+            TimeUnit.MILLISECONDS.sleep(200);
+        }
+        assertEquals(10L, orderCount, "MQ 消费后 DB 订单数必须恰为 10");
     }
 }

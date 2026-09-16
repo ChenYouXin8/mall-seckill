@@ -6,16 +6,19 @@ import com.example.seckill.entity.Order;
 import com.example.seckill.mapper.ActivityMapper;
 import com.example.seckill.mapper.OrderMapper;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.time.LocalDateTime;
 import java.util.List;
 
 /**
  * 场次与订单的查询/创建（M1 基础版：直连 DB）。
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class OrderService {
@@ -59,6 +62,8 @@ public class OrderService {
             orderMapper.insert(order);
             return true;
         } catch (DuplicateKeyException e) {
+            log.warn("订单插入唯一索引冲突: orderNo={}, userId={}, activityId={}, err={}",
+                    order.getOrderNo(), order.getUserId(), order.getActivityId(), e.getMessage());
             return false;
         }
     }
@@ -83,5 +88,34 @@ public class OrderService {
             upd.setStatus(2);
             orderMapper.updateById(upd);
         }
+    }
+
+    /**
+     * 模拟支付（F6）：待支付 → 已支付，可重复调用（幂等）。
+     *
+     * @return 支付后的订单；订单不存在或状态不允许返回 null
+     */
+    @Transactional
+    public Order payOrder(String orderNo) {
+        Order order = getByOrderNo(orderNo);
+        if (order == null) {
+            return null;
+        }
+        // 幂等：已支付直接返回成功
+        if (order.getStatus() == 1) {
+            return order;
+        }
+        // 仅待支付可支付
+        if (order.getStatus() != 0) {
+            return null;
+        }
+        Order upd = new Order();
+        upd.setId(order.getId());
+        upd.setStatus(1);
+        upd.setPayTime(LocalDateTime.now());
+        orderMapper.updateById(upd);
+        order.setStatus(1);
+        order.setPayTime(LocalDateTime.now());
+        return order;
     }
 }

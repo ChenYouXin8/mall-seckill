@@ -1,23 +1,23 @@
 package com.example.seckill.service;
 
+import com.example.seckill.config.SeckillMetrics;
 import com.example.seckill.entity.Activity;
-import com.example.seckill.entity.Order;
+import com.example.seckill.mq.OrderMessage;
+import com.example.seckill.mq.SeckillProducer;
 import com.example.seckill.redis.RedisLockUtil;
 import com.example.seckill.redis.RedisStockService;
 import com.example.seckill.util.ErrorCode;
 import com.example.seckill.util.SnowflakeIdWorker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
-import java.time.LocalDateTime;
 import java.util.HashMap;
 import java.util.Map;
 
 /**
- * 秒杀核心服务（M2：Redis 预热 + Lua 原子扣减 + 用户维度分布式锁 + 已购标记幂等，见文档 11 节 M2）。
- * 调用顺序严格遵循文档 7.4：加锁 → Lua 扣减 → 落单；任何失败回滚 Redis 扣减并释放锁。
+ * 秒杀核心服务（M3：Redis 预减 + MQ 异步下单削峰，见文档 11 节 M3 / 7.5）。
+ * 调用顺序严格遵循文档 7.4：加锁 → Lua 扣减 → 发 MQ；MQ 发送失败回滚 Redis 库存。
  */
 @Slf4j
 @Service
@@ -27,14 +27,12 @@ public class SeckillService {
     private final OrderService orderService;
     private final RedisStockService redisStockService;
     private final RedisLockUtil redisLockUtil;
-    private final SnowflakeIdWorker snowflakeIdWorker = new SnowflakeIdWorker();
-
-    @Value("${seckill.pay-expire-minutes:2}")
-    private int payExpireMinutes;
+    private final SeckillProducer seckillProducer;
+    private final SeckillMetrics metrics;
+    private final SnowflakeIdWorker snowflakeIdWorker;
 
     /**
-     * M2 同步抢购：状态校验 → 已购标记 → 分布式锁 → Lua 扣减 → 插单（唯一索引兜底）→ 已购标记。
-     * 插单失败回滚 Redis 库存（INCRBY 加回）。
+     * M3 抢购：状态校验 → 已购标记 → 分布式锁 → Lua 扣减 → MQ 异步下单 → 202。
      */
     public Map<String, Object> seckill(Long activityId, Long productId, Long userId) {
         Map<String, Object> result = new HashMap<>();
@@ -76,6 +74,7 @@ public class SeckillService {
             // Lua 原子扣减（文档 7.2）：1 成功 / 0 库存不足 / -1 未预热
             long deduct = redisStockService.deduct(activityId, productId);
             if (deduct == 0) {
+                metrics.deductFail.incrementAndGet();
                 result.put("code", ErrorCode.STOCK_NOT_ENOUGH);
                 result.put("message", "库存不足");
                 return result;
@@ -86,32 +85,24 @@ public class SeckillService {
                 result.put("message", "库存未预热，请先调用预热接口");
                 return result;
             }
+            metrics.deductSuccess.incrementAndGet();
 
-            // 插入订单（唯一索引 uk_user_activity 兜底，文档 7.4/ADR-3）
-            long orderId = snowflakeIdWorker.nextId();
-            String orderNo = String.valueOf(orderId);
-            Order order = new Order();
-            order.setId(orderId);
-            order.setOrderNo(orderNo);
-            order.setUserId(userId);
-            order.setActivityId(activityId);
-            order.setProductId(productId);
-            order.setStatus(0);
-            order.setExpireTime(LocalDateTime.now().plusMinutes(payExpireMinutes));
-
-            if (!orderService.tryCreateOrder(order)) {
-                // 并发重复：回滚 Redis 扣减（文档 7.4：失败必须回滚）
-                redisStockService.restore(activityId, productId);
-                log.warn("重复抢购被唯一索引拦截并回滚库存: userId={}, activityId={}", userId, activityId);
-                result.put("code", ErrorCode.DUPLICATE_ORDER);
-                result.put("message", "重复抢购");
+            // 发送异步下单消息（publisher confirms + 重试 3 次，文档 7.5）
+            String orderNo = String.valueOf(snowflakeIdWorker.nextId());
+            OrderMessage message = new OrderMessage(
+                    orderNo, userId, activityId, productId, System.currentTimeMillis());
+            if (!seckillProducer.send(message)) {
+                // MQ 发送失败：回滚 Redis 库存（文档 7.4/7.5 强制）
+                seckillProducer.rollbackRedisStock(activityId, productId);
+                result.put("code", ErrorCode.SYSTEM_ERROR);
+                result.put("message", "系统繁忙，请稍后重试");
                 return result;
             }
 
-            // 写已购标记（幂等，TTL 活动结束）
+            // 写已购标记（幂等，TTL 活动结束；消费者兜底幂等）
             redisStockService.markBought(activityId, userId);
 
-            log.info("抢购成功(Lua预减): orderNo={}, userId={}, activityId={}", orderNo, userId, activityId);
+            log.info("抢购成功(MQ异步): orderNo={}, userId={}, activityId={}", orderNo, userId, activityId);
             result.put("code", ErrorCode.SUCCESS);
             result.put("message", "排队中");
             Map<String, Object> data = new HashMap<>();
