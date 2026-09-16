@@ -10,6 +10,7 @@ import com.example.seckill.util.ErrorCode;
 import com.example.seckill.util.SnowflakeIdWorker;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.HashMap;
@@ -31,13 +32,21 @@ public class SeckillService {
     private final SeckillMetrics metrics;
     private final SnowflakeIdWorker snowflakeIdWorker;
 
+    @Value("${seckill.rate-limit.enabled:true}")
+    private boolean rateLimitEnabled;
+    @Value("${seckill.rate-limit.capacity:100}")
+    private int rateLimitCapacity;
+    @Value("${seckill.rate-limit.rate-per-second:100}")
+    private int rateLimitRatePerSecond;
+
     /**
-     * M3 抢购：状态校验 → 已购标记 → 分布式锁 → Lua 扣减 → MQ 异步下单 → 202。
+     * M4 抢购：状态校验 → 令牌桶限流 → 已购标记 → 分布式锁 → Lua 扣减 → MQ 异步下单 → 202。
      */
     public Map<String, Object> seckill(Long activityId, Long productId, Long userId) {
         Map<String, Object> result = new HashMap<>();
 
-        Activity activity = orderService.getActivity(activityId);
+        // 活动状态：优先读预热缓存的时间窗（服务端时间判定，文档 7.6/坑#8），未命中回退 DB 并回填，避免每请求查 DB
+        Activity activity = resolveActivity(activityId);
         if (activity == null) {
             result.put("code", ErrorCode.SYSTEM_ERROR);
             result.put("message", "场次不存在");
@@ -51,6 +60,14 @@ public class SeckillService {
         if (activity.getStatus() != 1) {
             result.put("code", ErrorCode.ENDED);
             result.put("message", "秒杀已结束");
+            return result;
+        }
+
+        // 活动维度令牌桶限流（文档 7.7 第二层）：超频 → 10005
+        if (rateLimitEnabled && !redisStockService.tryAcquire(activityId, rateLimitCapacity, rateLimitRatePerSecond)) {
+            metrics.rateLimited.incrementAndGet();
+            result.put("code", ErrorCode.RATE_LIMITED);
+            result.put("message", "请求过于频繁");
             return result;
         }
 
@@ -113,5 +130,29 @@ public class SeckillService {
         } finally {
             redisLockUtil.unlock(lockKey, token);
         }
+    }
+
+    /**
+     * 解析活动并按服务端时间计算状态（文档 7.6）。
+     * 预热缓存命中：纯 Redis，不查 DB；未命中：查 DB 并回填时间窗缓存。
+     */
+    private Activity resolveActivity(Long activityId) {
+        long[] window = redisStockService.getActivityWindow(activityId);
+        long now = System.currentTimeMillis();
+        if (window != null) {
+            Activity cached = new Activity();
+            cached.setId(activityId);
+            cached.setStatus(now < window[0] ? 0 : (now < window[1] ? 1 : 2));
+            return cached;
+        }
+        Activity activity = orderService.getActivity(activityId);
+        if (activity != null && activity.getStartTime() != null && activity.getEndTime() != null) {
+            long startMs = activity.getStartTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+            long endMs = activity.getEndTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+            long ttl = Math.max(60, (endMs - now) / 1000 + 86400);
+            redisStockService.cacheActivityWindow(activityId, startMs, endMs, ttl);
+            activity.setStatus(now < startMs ? 0 : (now < endMs ? 1 : 2));
+        }
+        return activity;
     }
 }

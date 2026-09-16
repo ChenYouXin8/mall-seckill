@@ -39,16 +39,49 @@ public class LuaScripts {
             "redis.call('incrby', KEYS[1], 1)\n" +
             "return 1";
 
+    /**
+     * 令牌桶限流（文档 7.7 第二层：应用内按活动维度限流，自定义 Lua 实现）。
+     * KEYS[1]=rate key（Hash: tokens/last），ARGV[1]=capacity，ARGV[2]=rate/s，ARGV[3]=now(ms)。
+     * 返回 1=放行（扣 1 个 token）/ 0=限流。
+     */
+    public static final String RATE_LIMIT_LUA =
+            "local t = redis.call('hget', KEYS[1], 'tokens')\n" +
+            "local l = redis.call('hget', KEYS[1], 'last')\n" +
+            "local capacity = tonumber(ARGV[1])\n" +
+            "if t == false then\n" +
+            "    t = capacity\n" +
+            "    l = tonumber(ARGV[3])\n" +
+            "else\n" +
+            "    t = tonumber(t)\n" +
+            "    l = tonumber(l)\n" +
+            "end\n" +
+            "local elapsed = tonumber(ARGV[3]) - l\n" +
+            "if elapsed > 0 then\n" +
+            "    local refill = elapsed * tonumber(ARGV[2]) / 1000\n" +
+            "    if refill > 0 then\n" +
+            "        t = math.min(capacity, t + refill)\n" +
+            "        l = tonumber(ARGV[3])\n" +
+            "    end\n" +
+            "end\n" +
+            "if t >= 1 then\n" +
+            "    redis.call('hset', KEYS[1], 'tokens', t - 1, 'last', l)\n" +
+            "    return 1\n" +
+            "end\n" +
+            "redis.call('hset', KEYS[1], 'tokens', t, 'last', l)\n" +
+            "return 0";
+
     private DefaultRedisScript<Long> stockDeductScript;
     private DefaultRedisScript<Long> lockReleaseScript;
     private DefaultRedisScript<Long> stockRestoreScript;
+    private DefaultRedisScript<Long> rateLimitScript;
 
     @PostConstruct
     void init() {
         stockDeductScript = buildScript(STOCK_DEDUCT_LUA);
         lockReleaseScript = buildScript(LOCK_RELEASE_LUA);
         stockRestoreScript = buildScript(STOCK_RESTORE_LUA);
-        log.info("Lua 脚本加载完成：库存扣减/释放锁/库存回补");
+        rateLimitScript = buildScript(RATE_LIMIT_LUA);
+        log.info("Lua 脚本加载完成：库存扣减/释放锁/库存回补/令牌桶限流");
     }
 
     private DefaultRedisScript<Long> buildScript(String lua) {
@@ -68,5 +101,9 @@ public class LuaScripts {
 
     public DefaultRedisScript<Long> stockRestore() {
         return stockRestoreScript;
+    }
+
+    public DefaultRedisScript<Long> rateLimit() {
+        return rateLimitScript;
     }
 }

@@ -17,6 +17,7 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
 
 import java.time.LocalDateTime;
@@ -30,6 +31,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
  * 制造 1 条超时订单 → 执行回补任务 → 订单关闭、Redis 与 DB 库存各 +1。
  */
 @SpringBootTest
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
 class OrderExpireTaskTest {
 
     @Autowired

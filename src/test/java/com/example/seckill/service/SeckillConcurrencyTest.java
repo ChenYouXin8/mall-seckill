@@ -16,7 +16,9 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.test.context.TestPropertySource;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -34,8 +36,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 /**
  * M2/M3 验收测试（文档 7.2/10.1）：
  * 并发 5000 线程抢 10 件库存 → Lua 扣减成功恰 10 次、Redis 余量 0、MQ 消费后 DB 订单恰 10 条。
+ * 说明：M4 起 SeckillService 内按活动维度令牌桶限流，本测试关注防超卖本身，故关闭限流。
  */
 @SpringBootTest
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+@TestPropertySource(properties = {"seckill.rate-limit.enabled=false"})
 class SeckillConcurrencyTest {
 
     @Autowired
@@ -117,6 +122,7 @@ class SeckillConcurrencyTest {
         AtomicInteger success = new AtomicInteger();
         AtomicInteger stockNotEnough = new AtomicInteger();
         AtomicInteger other = new AtomicInteger();
+        java.util.concurrent.ConcurrentHashMap<Long, Integer> callCount = new java.util.concurrent.ConcurrentHashMap<>();
 
         for (int i = 0; i < threads; i++) {
             long userId = 1000000L + i;
@@ -124,6 +130,7 @@ class SeckillConcurrencyTest {
                 ready.countDown();
                 try {
                     start.await();
+                    callCount.merge(userId, 1, Integer::sum);
                     Map<String, Object> r = seckillService.seckill(activityId, 1001L, userId);
                     int code = (int) r.get("code");
                     if (code == 0) {
@@ -144,6 +151,9 @@ class SeckillConcurrencyTest {
         start.countDown();
         assertTrue(done.await(180, TimeUnit.SECONDS), "并发抢购超时");
         pool.shutdown();
+
+        // 诊断：每个 userId 必须恰好调用 1 次（排除任务重复提交）
+        assertEquals(threads, callCount.size(), "每个 userId 应恰好调用 1 次");
 
         // 入口层断言
         assertEquals(10, success.get(), "Lua 扣减成功次数必须恰为 10（不得超卖）");

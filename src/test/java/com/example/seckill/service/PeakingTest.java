@@ -19,7 +19,9 @@ import org.springframework.amqp.rabbit.core.RabbitAdmin;
 import org.springframework.amqp.rabbit.core.RabbitTemplate;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.test.annotation.DirtiesContext;
 import org.springframework.data.redis.core.StringRedisTemplate;
+import org.springframework.test.context.TestPropertySource;
 
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -38,8 +40,11 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * M3 削峰验证（文档 7.5 验收）：
  * 2000 并发抢 1000 件库存，入口瞬时打满，MQ 异步消费落库。
  * 记录 DB 侧最大瞬时写入速率（削峰后），验证削峰比与最终一致性。
+ * 说明：M4 起 SeckillService 内按活动维度令牌桶限流，本测试关注削峰本身，故关闭限流。
  */
 @SpringBootTest
+@DirtiesContext(classMode = DirtiesContext.ClassMode.AFTER_CLASS)
+@TestPropertySource(properties = {"seckill.rate-limit.enabled=false"})
 class PeakingTest {
 
     private static final Logger log = LoggerFactory.getLogger(PeakingTest.class);

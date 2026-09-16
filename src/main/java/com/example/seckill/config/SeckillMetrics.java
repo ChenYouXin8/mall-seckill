@@ -24,6 +24,8 @@ public class SeckillMetrics {
     public final AtomicLong orderSuccess = new AtomicLong();
     /** 库存回补计数 */
     public final AtomicLong restoreCount = new AtomicLong();
+    /** 限流拒绝计数 */
+    public final AtomicLong rateLimited = new AtomicLong();
 
     public void recordConsume(long costMs) {
         consumeCostMs.addAndGet(costMs);
@@ -37,9 +39,9 @@ public class SeckillMetrics {
     }
 
     public void logSnapshot() {
-        log.info("[SeckillMetrics] 扣减成功={}, 扣减失败={}, 下单成功={}, 回补={}, " +
+        log.info("[SeckillMetrics] 扣减成功={}, 扣减失败={}, 下单成功={}, 回补={}, 限流拒绝={}, " +
                         "MQ消费次数={}, 平均消费耗时={}ms",
-                deductSuccess.get(), deductFail.get(), orderSuccess.get(), restoreCount.get(),
+                deductSuccess.get(), deductFail.get(), orderSuccess.get(), restoreCount.get(), rateLimited.get(),
                 consumeCount.get(), String.format("%.2f", avgConsumeMs()));
     }
 }

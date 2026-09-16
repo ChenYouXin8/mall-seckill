@@ -5,3 +5,17 @@ target/
 .idea/
 *.iml
 .vscode/
+
+# JMeter HTML 报告（第三方静态资源，可用 jtl 重新生成：jmeter -g result.jtl -o report）
+jmeter/report/
+jmeter/report-*/
+jmeter/jmeter.log
+
+# 压测/排障临时文件
+*.txt
+!jmeter/*.txt
+activity-body.json
+order-body.json
+jmeter-setup.txt
+conditions.json
+erl_crash.dump

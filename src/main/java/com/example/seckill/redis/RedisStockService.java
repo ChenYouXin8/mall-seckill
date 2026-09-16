@@ -25,6 +25,9 @@ public class RedisStockService {
     public static final String BOUGHT_KEY_PREFIX = "seckill:bought:";
     public static final String RESULT_KEY_PREFIX = "seckill:result:";
     public static final String COMPENSATE_KEY_PREFIX = "seckill:compensate:";
+    public static final String ADDRESS_KEY_PREFIX = "seckill:address:";
+    public static final String RATE_KEY_PREFIX = "seckill:rate:";
+    public static final String ACTIVITY_KEY_PREFIX = "seckill:activity:";
 
     private final StringRedisTemplate redisTemplate;
     private final LuaScripts luaScripts;
@@ -143,6 +146,63 @@ public class RedisStockService {
             return Long.parseLong(val);
         } catch (NumberFormatException e) {
             return 0;
+        }
+    }
+
+    /**
+     * 保存秒杀隐藏地址（文档 7.7：seckill:address:{activityId}，TTL=活动剩余时间）。
+     */
+    public void saveAddress(Long activityId, String secret, long ttlSeconds) {
+        redisTemplate.opsForValue().set(ADDRESS_KEY_PREFIX + activityId, secret, ttlSeconds, TimeUnit.SECONDS);
+        log.info("生成秒杀地址: activityId={}, secret={}, ttl={}s", activityId, secret, ttlSeconds);
+    }
+
+    /**
+     * 读取秒杀隐藏地址（校验抢购 secretPath 用）。
+     */
+    public String getAddress(Long activityId) {
+        return redisTemplate.opsForValue().get(ADDRESS_KEY_PREFIX + activityId);
+    }
+
+    /**
+     * 令牌桶限流（文档 7.7 第二层，活动维度）。true=放行 / false=限流(10005)。
+     */
+    public boolean tryAcquire(Long activityId, int capacity, int ratePerSecond) {
+        DefaultRedisScript<Long> script = luaScripts.rateLimit();
+        Long result = redisTemplate.execute(script,
+                Collections.singletonList(RATE_KEY_PREFIX + activityId),
+                String.valueOf(capacity), String.valueOf(ratePerSecond), String.valueOf(System.currentTimeMillis()));
+        return result != null && result == 1L;
+    }
+
+    public String addressKey(Long activityId) {
+        return ADDRESS_KEY_PREFIX + activityId;
+    }
+
+    /**
+     * 缓存活动时间窗（文档 7.6 缓存一致性：预热时写入，抢购入口据此判断状态，避免每请求查 DB）。
+     * 值为 "startEpochMs,endEpochMs"，TTL 覆盖活动结束后 1 天。
+     */
+    public void cacheActivityWindow(Long activityId, long startEpochMs, long endEpochMs, long ttlSeconds) {
+        redisTemplate.opsForValue().set(ACTIVITY_KEY_PREFIX + activityId,
+                startEpochMs + "," + endEpochMs, ttlSeconds, TimeUnit.SECONDS);
+    }
+
+    /**
+     * 读活动时间窗；未预热缓存返回 null（调用方回退 DB 并回填）。
+     *
+     * @return [startEpochMs, endEpochMs] 或 null
+     */
+    public long[] getActivityWindow(Long activityId) {
+        String v = redisTemplate.opsForValue().get(ACTIVITY_KEY_PREFIX + activityId);
+        if (v == null || v.isBlank()) {
+            return null;
+        }
+        try {
+            String[] parts = v.split(",");
+            return new long[]{Long.parseLong(parts[0].trim()), Long.parseLong(parts[1].trim())};
+        } catch (RuntimeException e) {
+            return null;
         }
     }
 }

@@ -1,5 +1,13 @@
 server:
   port: 8080
+  tomcat:
+    # 高并发入口调优（文档第 8 节：单机 QPS 目标 ≥5000）
+    threads:
+      max: 1000
+      min-spare: 100
+    accept-count: 4000
+    max-connections: 20000
+    connection-timeout: 5000
 
 spring:
   application:
@@ -10,8 +18,9 @@ spring:
     password: seckill123
     driver-class-name: com.mysql.cj.jdbc.Driver
     hikari:
-      maximum-pool-size: 50
-      minimum-idle: 5
+      maximum-pool-size: 200
+      minimum-idle: 20
+      connection-timeout: 10000
   jackson:
     date-format: yyyy-MM-dd HH:mm:ss
     time-zone: Asia/Shanghai
@@ -22,8 +31,9 @@ spring:
       timeout: 3s
       lettuce:
         pool:
-          max-active: 64
-          max-idle: 16
+          max-active: 256
+          max-idle: 64
+          min-idle: 16
   rabbitmq:
     host: localhost
     port: 5672
@@ -47,6 +57,11 @@ mybatis-plus:
 seckill:
   test-token: "test-token"
   pay-expire-minutes: 2
+  address-ttl-seconds: 7200
+  rate-limit:
+    enabled: true
+    capacity: 100
+    rate-per-second: 100
 
 management:
   endpoints:

@@ -88,6 +88,14 @@ public class AdminController {
      */
     @PostMapping("/seckill/activities/{id}/preheat")
     public Result<Map<String, Object>> preheat(@PathVariable Long id) {
+        // 缓存活动时间窗（文档 7.6：抢购入口据此判断状态，避免每请求查 DB）
+        Activity activity = activityMapper.selectById(id);
+        if (activity != null && activity.getStartTime() != null && activity.getEndTime() != null) {
+            long startMs = activity.getStartTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+            long endMs = activity.getEndTime().atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli();
+            long ttl = Math.max(60, (endMs - System.currentTimeMillis()) / 1000 + 86400);
+            redisStockService.cacheActivityWindow(id, startMs, endMs, ttl);
+        }
         List<Stock> stocks = stockMapper.selectList(
                 new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Stock>()
                         .eq(Stock::getActivityId, id));
