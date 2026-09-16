@@ -29,6 +29,7 @@ public class AdminController {
 
     private final ActivityMapper activityMapper;
     private final StockMapper stockMapper;
+    private final com.example.seckill.redis.RedisStockService redisStockService;
 
     /**
      * POST /api/admin/seckill/activities 创建场次（F1）。
@@ -83,19 +84,28 @@ public class AdminController {
 
     /**
      * POST /api/admin/seckill/activities/{id}/preheat 预热库存到 Redis（F2）。
-     * M1 暂以 DB 为准返回快照（Redis 接入见 M2 里程碑）。
+     * SET NX 幂等：仅当 Redis 无该 key 时写入 DB total_stock；重复预热不翻倍。
      */
     @PostMapping("/seckill/activities/{id}/preheat")
     public Result<Map<String, Object>> preheat(@PathVariable Long id) {
         List<Stock> stocks = stockMapper.selectList(
                 new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Stock>()
                         .eq(Stock::getActivityId, id));
+        if (stocks.isEmpty()) {
+            return Result.fail(400, "场次无库存商品");
+        }
         Map<String, Object> data = new java.util.HashMap<>();
+        List<Map<String, Object>> items = new java.util.ArrayList<>();
+        for (Stock s : stocks) {
+            boolean written = redisStockService.preheat(s.getActivityId(), s.getProductId(), s.getTotalStock());
+            items.add(Map.of(
+                    "productId", s.getProductId(),
+                    "totalStock", s.getTotalStock(),
+                    "redisWritten", written));
+        }
         data.put("activityId", id);
-        data.put("items", stocks.stream().map(s -> Map.of(
-                "productId", s.getProductId(),
-                "totalStock", s.getTotalStock())).toList());
-        log.info("预热接口(M1占位): activityId={}, items={}", id, stocks.size());
-        return Result.ok("预热成功(M1:DB快照,Redis待M2)", data);
+        data.put("items", items);
+        log.info("预热库存: activityId={}, items={}", id, items.size());
+        return Result.ok("预热成功", data);
     }
 }
