@@ -1,10 +1,14 @@
 package com.example.seckill.service;
 
 import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.example.seckill.dto.ActivityVO;
 import com.example.seckill.entity.Activity;
 import com.example.seckill.entity.Order;
+import com.example.seckill.entity.Stock;
 import com.example.seckill.mapper.ActivityMapper;
 import com.example.seckill.mapper.OrderMapper;
+import com.example.seckill.mapper.StockMapper;
+import com.example.seckill.redis.RedisStockService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DuplicateKeyException;
@@ -13,6 +17,7 @@ import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
+import java.util.ArrayList;
 import java.util.List;
 
 /**
@@ -25,6 +30,8 @@ public class OrderService {
 
     private final OrderMapper orderMapper;
     private final ActivityMapper activityMapper;
+    private final StockMapper stockMapper;
+    private final RedisStockService redisStockService;
 
     /**
      * 场次列表。
@@ -32,6 +39,42 @@ public class OrderService {
     public List<Activity> listActivities() {
         return activityMapper.selectList(
                 new LambdaQueryWrapper<Activity>().orderByDesc(Activity::getId));
+    }
+
+    /**
+     * 场次列表（含库存聚合，供前端列表/卡片展示）。
+     * 每个场次附加：首个商品的 productId/剩余库存 stock/总库存 totalStock，以及是否已预热。
+     */
+    public List<ActivityVO> listActivitiesWithStock() {
+        List<Activity> activities = listActivities();
+        List<ActivityVO> result = new ArrayList<>(activities.size());
+        for (Activity a : activities) {
+            ActivityVO vo = new ActivityVO();
+            vo.setId(a.getId());
+            vo.setTitle(a.getTitle());
+            vo.setStartTime(a.getStartTime());
+            vo.setEndTime(a.getEndTime());
+            vo.setPrice(a.getPrice());
+            vo.setStatus(a.getStatus());
+            vo.setCreatedAt(a.getCreatedAt());
+            vo.setUpdatedAt(a.getUpdatedAt());
+
+            List<Stock> stocks = stockMapper.selectList(
+                    new LambdaQueryWrapper<Stock>()
+                            .eq(Stock::getActivityId, a.getId())
+                            .orderByAsc(Stock::getId));
+            if (!stocks.isEmpty()) {
+                Stock first = stocks.get(0);
+                vo.setProductId(first.getProductId());
+                vo.setStock(first.getStock());
+                vo.setTotalStock(first.getTotalStock());
+                vo.setPreheated(redisStockService.remaining(first.getActivityId(), first.getProductId()) != null);
+            } else {
+                vo.setPreheated(false);
+            }
+            result.add(vo);
+        }
+        return result;
     }
 
     /**
@@ -74,6 +117,41 @@ public class OrderService {
     public Order getByOrderNo(String orderNo) {
         return orderMapper.selectOne(
                 new LambdaQueryWrapper<Order>().eq(Order::getOrderNo, orderNo));
+    }
+
+    /**
+     * 订单列表（管理端）：userId 为空则返回全部，按创建时间倒序，最多 limit 条。
+     */
+    public List<Order> listOrders(Long userId, int limit) {
+        LambdaQueryWrapper<Order> wrapper = new LambdaQueryWrapper<>();
+        if (userId != null) {
+            wrapper.eq(Order::getUserId, userId);
+        }
+        wrapper.orderByDesc(Order::getCreatedAt);
+        wrapper.last("LIMIT " + Math.max(1, Math.min(limit, 500)));
+        return orderMapper.selectList(wrapper);
+    }
+
+    /**
+     * 管理端关单（按订单号）：仅待支付可关，关闭后回补 DB + Redis 库存。
+     *
+     * @return 关闭后的订单；订单不存在或状态不允许返回 null
+     */
+    @Transactional
+    public Order cancelByOrderNo(String orderNo) {
+        Order order = getByOrderNo(orderNo);
+        if (order == null || order.getStatus() == null || order.getStatus() != 0) {
+            return null;
+        }
+        int affected = orderMapper.closeExpired(order.getId());
+        if (affected == 0) {
+            return getByOrderNo(orderNo);
+        }
+        stockMapper.restoreStock(order.getActivityId(), order.getProductId());
+        redisStockService.restore(order.getActivityId(), order.getProductId());
+        order.setStatus(3);
+        log.info("管理端关单: orderNo={}, userId={}, 库存已回补", orderNo, order.getUserId());
+        return order;
     }
 
     /**

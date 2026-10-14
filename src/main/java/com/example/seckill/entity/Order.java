@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
@@ -26,6 +27,9 @@ public class Order {
     private Long activityId;
 
     private Long productId;
+
+    /** 下单价格快照（元） */
+    private BigDecimal price;
 
     /** 0-待支付 1-已支付 2-已取消 3-超时关闭 */
     private Integer status;

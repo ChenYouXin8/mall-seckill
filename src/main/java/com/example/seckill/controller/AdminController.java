@@ -8,12 +8,14 @@ import com.example.seckill.util.Result;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 import java.util.List;
 import java.util.Map;
@@ -30,6 +32,24 @@ public class AdminController {
     private final ActivityMapper activityMapper;
     private final StockMapper stockMapper;
     private final com.example.seckill.redis.RedisStockService redisStockService;
+
+    /**
+     * GET /api/admin/seckill/activities/{id} 场次详情（含库存）。
+     */
+    @GetMapping("/seckill/activities/{id}")
+    public Result<Map<String, Object>> detail(@PathVariable Long id) {
+        Activity activity = activityMapper.selectById(id);
+        if (activity == null) {
+            return Result.fail(400, "场次不存在");
+        }
+        List<Stock> stocks = stockMapper.selectList(
+                new com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper<Stock>()
+                        .eq(Stock::getActivityId, id));
+        Map<String, Object> data = new java.util.HashMap<>();
+        data.put("activity", activity);
+        data.put("stocks", stocks);
+        return Result.ok(data);
+    }
 
     /**
      * POST /api/admin/seckill/activities 创建场次（F1）。
@@ -52,10 +72,24 @@ public class AdminController {
             return Result.fail(400, "时间非法：startTime 必须早于 endTime");
         }
 
+        BigDecimal price = null;
+        Object priceRaw = body.get("price");
+        if (priceRaw != null && !priceRaw.toString().isBlank()) {
+            try {
+                price = new BigDecimal(priceRaw.toString().trim());
+            } catch (NumberFormatException e) {
+                return Result.fail(400, "price 格式非法");
+            }
+            if (price.signum() < 0) {
+                return Result.fail(400, "price 不能为负");
+            }
+        }
+
         Activity activity = new Activity();
         activity.setTitle(title);
         activity.setStartTime(startTime);
         activity.setEndTime(endTime);
+        activity.setPrice(price);
         // 0-未开始 1-进行中 2-已结束 3-已关闭；按当前时间自动计算状态
         LocalDateTime now = LocalDateTime.now();
         activity.setStatus(now.isBefore(startTime) ? 0 : (now.isBefore(endTime) ? 1 : 2));

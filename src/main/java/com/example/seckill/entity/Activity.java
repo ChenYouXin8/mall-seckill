@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import lombok.Data;
 
+import java.math.BigDecimal;
 import java.time.LocalDateTime;
 
 /**
@@ -26,6 +27,9 @@ public class Activity {
 
     /** 结束时间 */
     private LocalDateTime endTime;
+
+    /** 秒杀价（元） */
+    private BigDecimal price;
 
     /** 0-未开始 1-进行中 2-已结束 3-已关闭 */
     private Integer status;

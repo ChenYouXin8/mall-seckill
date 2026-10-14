@@ -7,6 +7,7 @@ import com.example.seckill.util.ErrorCode;
 import com.example.seckill.util.Result;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.servlet.http.HttpServletRequest;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -17,6 +18,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -84,6 +86,38 @@ public class OrderController {
         data.put("orderNo", order.getOrderNo());
         data.put("status", statusText(order.getStatus()));
         return Result.ok("支付成功", data);
+    }
+
+    /**
+     * GET /api/seckill/v1/order/list 订单列表（管理端）。
+     * 不带 userId 参数返回全部（管理端订单页用）；带 userId 则仅返回该用户订单。
+     */
+    @GetMapping("/list")
+    public Result<List<Order>> list(@RequestParam(required = false) Long userId,
+                                    @RequestParam(required = false, defaultValue = "200") Integer limit) {
+        return Result.ok(orderService.listOrders(userId, limit == null ? 200 : limit));
+    }
+
+    /**
+     * POST /api/seckill/v1/order/cancel 管理端关单。
+     * 请求体：{ "orderNo": "..." }；仅待支付可关，关闭后回补库存。
+     */
+    @PostMapping("/cancel")
+    public Result<Map<String, Object>> cancel(@RequestBody Map<String, Object> body) {
+        String orderNo = body.get("orderNo") == null ? null : body.get("orderNo").toString();
+        if (orderNo == null || orderNo.isBlank()) {
+            return Result.fail(400, "参数错误");
+        }
+        Order order = orderService.cancelByOrderNo(orderNo);
+        if (order == null) {
+            return Result.fail(ErrorCode.ORDER_INVALID, "订单不存在或状态不允许");
+        }
+        redisStockService.deleteResult(orderNo);
+        Map<String, Object> data = new HashMap<>();
+        data.put("orderNo", order.getOrderNo());
+        data.put("status", statusText(order.getStatus()));
+        data.put("orderStatus", order.getStatus());
+        return Result.ok("订单已关闭", data);
     }
 
     private String statusText(Integer status) {

@@ -1,5 +1,6 @@
 package com.example.seckill.controller;
 
+import com.example.seckill.dto.ActivityVO;
 import com.example.seckill.entity.Activity;
 import com.example.seckill.redis.RedisStockService;
 import com.example.seckill.service.OrderService;
@@ -46,8 +47,8 @@ public class SeckillController {
      * GET /api/seckill/v1/activities 场次列表（无需鉴权）。
      */
     @GetMapping("/activities")
-    public Result<List<Activity>> activities() {
-        return Result.ok(orderService.listActivities());
+    public Result<List<ActivityVO>> activities() {
+        return Result.ok(orderService.listActivitiesWithStock());
     }
 
     /**

@@ -2,6 +2,7 @@ package com.example.seckill.mq;
 
 import com.example.seckill.config.RabbitConfig;
 import com.example.seckill.config.SeckillMetrics;
+import com.example.seckill.entity.Activity;
 import com.example.seckill.entity.Order;
 import com.example.seckill.redis.RedisStockService;
 import com.example.seckill.service.OrderService;
@@ -90,6 +91,11 @@ public class OrderConsumer {
         order.setUserId(msg.getUserId());
         order.setActivityId(msg.getActivityId());
         order.setProductId(msg.getProductId());
+        // 价格快照：取场次当前秒杀价，锁价于下单时刻
+        Activity activity = orderService.getActivity(msg.getActivityId());
+        if (activity != null) {
+            order.setPrice(activity.getPrice());
+        }
         order.setStatus(0);
         order.setExpireTime(LocalDateTime.now().plusMinutes(2));
         if (!orderService.tryCreateOrder(order)) {
